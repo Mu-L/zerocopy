@@ -743,6 +743,80 @@ impl<T> Unalign<T> {
         val
     }
 
+    /// Attempts to return a reference to the wrapped `T`, failing if `self` is
+    /// not properly aligned.
+    ///
+    /// If `self` does not satisfy `mem::align_of::<T>()`, then it is unsound to
+    /// return a reference to the wrapped `T`, and `try_deref` returns `None`.
+    ///
+    /// If `T: Unaligned`, then `Unalign<T>` implements [`Deref`], and callers
+    /// may prefer `[Deref::deref]`, which is infallible.
+    pub fn try_deref(&self) -> Option<&T> {
+        if !aligned_to(self, mem::align_of::<T>()) {
+            return None;
+        }
+
+        // SAFETY: `deref_unchecked`'s safety requirement is that `self` is
+        // aligned to `align_of::<T>()`, which we just checked.
+        unsafe { Some(self.deref_unchecked()) }
+    }
+
+    /// Attempts to return a mutable reference to the wrapped `T`, failing if
+    /// `self` is not properly aligned.
+    ///
+    /// If `self` does not satisfy `mem::align_of::<T>()`, then it is unsound to
+    /// return a reference to the wrapped `T`, and `try_deref_mut` returns
+    /// `None`.
+    ///
+    /// If `T: Unaligned`, then `Unalign<T>` implements [`DerefMut`], and
+    /// callers may prefer `[DerefMut::deref_mut]`, which is infallible.
+    pub fn try_deref_mut(&mut self) -> Option<&mut T> {
+        if !aligned_to(&*self, mem::align_of::<T>()) {
+            return None;
+        }
+
+        // SAFETY: `deref_mut_unchecked`'s safety requirement is that `self` is
+        // aligned to `align_of::<T>()`, which we just checked.
+        unsafe { Some(self.deref_mut_unchecked()) }
+    }
+
+    /// Returns a reference to the wrapped `T` without checking alignment.
+    ///
+    /// If `T: Unaligned`, then `Unalign<T>` implements[ `Deref`], and callers
+    /// may prefer `[Deref::deref]`, which is safe.
+    ///
+    /// # Safety
+    ///
+    /// If `self` does not satisfy `mem::align_of::<T>()`, then
+    /// `self.deref_unchecked()` may cause undefined behavior.
+    pub unsafe fn deref_unchecked(&self) -> &T {
+        // SAFETY: `self.get_ptr()` returns a raw pointer to a valid `T` at the
+        // same memory location as `self`. It has no alignment guarantee, but
+        // the caller has promised that `self` is properly aligned, so we know
+        // that the pointer itself is aligned, and thus that it is sound to
+        // create a reference to a `T` at this memory location.
+        unsafe { &*self.get_ptr() }
+    }
+
+    /// Returns a mutable reference to the wrapped `T` without checking
+    /// alignment.
+    ///
+    /// If `T: Unaligned`, then `Unalign<T>` implements[ `DerefMut`], and
+    /// callers may prefer `[DerefMut::deref_mut]`, which is safe.
+    ///
+    /// # Safety
+    ///
+    /// If `self` does not satisfy `mem::align_of::<T>()`, then
+    /// `self.deref_mut_unchecked()` may cause undefined behavior.
+    pub unsafe fn deref_mut_unchecked(&mut self) -> &mut T {
+        // SAFETY: `self.get_mut_ptr()` returns a raw pointer to a valid `T` at
+        // the same memory location as `self`. It has no alignment guarantee,
+        // but the caller has promised that `self` is properly aligned, so we
+        // know that the pointer itself is aligned, and thus that it is sound to
+        // create a reference to a `T` at this memory location.
+        unsafe { &mut *self.get_mut_ptr() }
+    }
+
     /// Gets an unaligned raw pointer to the inner `T`.
     ///
     /// # Safety
@@ -785,6 +859,24 @@ impl<T: Copy> Unalign<T> {
     pub fn get(&self) -> T {
         let Unalign(val) = *self;
         val
+    }
+}
+
+impl<T: Unaligned> Deref for Unalign<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: `deref_unchecked`'s safety requirement is that `self` is
+        // aligned to `align_of::<T>()`, which is guaranteed by `T: Unaligned`.
+        unsafe { self.deref_unchecked() }
+    }
+}
+
+impl<T: Unaligned> DerefMut for Unalign<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: `deref_mut_unchecked`'s safety requirement is that `self` is
+        // aligned to `align_of::<T>()`, which is guaranteed by `T: Unaligned`.
+        unsafe { self.deref_mut_unchecked() }
     }
 }
 
@@ -1624,9 +1716,41 @@ where
     }
 }
 
-#[inline]
-fn aligned_to(bytes: &[u8], align: usize) -> bool {
-    (bytes as *const _ as *const () as usize) % align == 0
+trait AsAddress {
+    fn addr(self) -> usize;
+}
+
+impl<'a, T: ?Sized> AsAddress for &'a T {
+    #[inline(always)]
+    fn addr(self) -> usize {
+        self as *const T as *const () as usize
+    }
+}
+
+impl<'a, T: ?Sized> AsAddress for &'a mut T {
+    #[inline(always)]
+    fn addr(self) -> usize {
+        self as *mut T as *mut () as usize
+    }
+}
+
+impl<T: ?Sized> AsAddress for *const T {
+    #[inline(always)]
+    fn addr(self) -> usize {
+        self as *const () as usize
+    }
+}
+
+impl<T: ?Sized> AsAddress for *mut T {
+    #[inline(always)]
+    fn addr(self) -> usize {
+        self as *mut () as usize
+    }
+}
+
+#[inline(always)]
+fn aligned_to<T: AsAddress>(t: T, align: usize) -> bool {
+    t.addr() % align == 0
 }
 
 impl<B, T> LayoutVerified<B, T>
@@ -2235,6 +2359,12 @@ mod tests {
     // Converts a `u64` to bytes using this platform's endianness.
     fn u64_to_bytes(u: u64) -> [u8; 8] {
         unsafe { ptr::read(&u as *const u64 as *const [u8; 8]) }
+    }
+
+    #[test]
+    fn test_unalign() {
+        // Test the `Unalign` type.
+        todo!()
     }
 
     #[test]
