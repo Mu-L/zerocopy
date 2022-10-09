@@ -852,6 +852,47 @@ macro_rules! transmute {
     }}
 }
 
+/// Includes a file and safely transmutes it to an arbitrary type.
+///
+/// The file will be included as a byte array, `[u8; N]`, which will be
+/// transmuted to another type, `T`. `T` is inferred from the calling context,
+/// and must implement [`FromBytes`].
+///
+/// The file is located relative to the current file (similarly to how modules
+/// are found). The provided path is interpreted in a platform-specific way at
+/// compile time. So, for instance, an invocation with a Windows path containing
+/// backslashes `\` would not compile correctly on Unix.
+///
+/// # Examples
+///
+/// Assume there are two files in the same directory with the following
+/// contents:
+///
+/// File 'data' (no trailing newline):
+///
+/// ```text
+/// abcd
+/// ```
+///
+/// File 'main.rs':
+///
+/// ```rust,ignore (cannot-doctest-external-file-dependency)
+/// use zerocopy::{I32, NativeEndian, U32};
+///
+/// fn main() {
+///     let as_u32: u32 = zerocopy::include_bytes!("data");
+///     assert_eq!(as_u32, U32::<NativeEndian>::from([b'a', b'b', b'c', b'd']).get());
+///     let as_i32: i32 = zerocopy::include_bytes!("data");
+///     assert_eq!(as_u32, I32::<NativeEndian>::from([b'a', b'b', b'c', b'd']).get());
+/// }
+/// ```
+#[macro_export]
+macro_rules! include_bytes {
+    ($file:expr $(,)?) => {
+        transmute!(*core::include_bytes!($file))
+    };
+}
+
 /// A length- and alignment-checked reference to a byte slice which can safely
 /// be reinterpreted as another type.
 ///
@@ -2301,6 +2342,14 @@ mod tests {
             }
         }
         let _: () = transmute!(PanicOnDrop(()));
+    }
+
+    #[test]
+    fn test_include_bytes() {
+        let as_u32: u32 = include_bytes!("../tests/include_bytes.data");
+        assert_eq!(as_u32, U32::<NativeEndian>::from([b'a', b'b', b'c', b'd']).get());
+        let as_i32: i32 = include_bytes!("../tests/include_bytes.data");
+        assert_eq!(as_i32, I32::<NativeEndian>::from([b'a', b'b', b'c', b'd']).get());
     }
 
     #[test]
