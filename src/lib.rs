@@ -44,6 +44,10 @@
 //! which are only available on nightly. Since these types are unstable, support
 //! for any type may be removed at any point in the future.
 //!
+//! # Minimum Supported Rust Version (MSRV)
+//!
+//! zerocopy's MSRV is 1.61.0.
+//!
 //! [simd-layout]: https://rust-lang.github.io/unsafe-code-guidelines/layout/packed-simd-vectors.html
 
 #![deny(
@@ -117,7 +121,7 @@ use core::{
     cmp::Ordering,
     fmt::{self, Debug, Display, Formatter},
     marker::PhantomData,
-    mem::{self, MaybeUninit},
+    mem::{self, ManuallyDrop, MaybeUninit},
     num::{
         NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize, NonZeroU128,
         NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize, Wrapping,
@@ -808,14 +812,29 @@ impl<T: Copy> Clone for Unalign<T> {
 
 impl<T> Unalign<T> {
     /// Constructs a new `Unalign`.
-    pub fn new(val: T) -> Unalign<T> {
+    pub const fn new(val: T) -> Unalign<T> {
         Unalign(val)
     }
 
     /// Consumes `self`, returning the inner `T`.
-    pub fn into_inner(self) -> T {
-        let Unalign(val) = self;
-        val
+    pub const fn into_inner(self) -> T {
+        // Use this instead of `mem::transmute` since the latter can't tell
+        // that `Unalign<T>` and `T` have the same size.
+        union Transmute<T> {
+            u: ManuallyDrop<Unalign<T>>,
+            t: ManuallyDrop<T>,
+        }
+
+        // SAFETY: Since `Unalign` is `#[repr(C, packed)]`, it has the same
+        // layout as `T`. `ManuallyDrop<U>` is guaranteed to have the same
+        // layout as `U`, and so `ManuallyDrop<Unalign<T>>` has the same layout
+        // as `ManuallyDrop<T>`. We do this instead of just destructuring in
+        // order to prevent `Unalign`'s `Drop::drop` from being run, since
+        // dropping is not supported in `const fn`s.
+        //
+        // TODO(https://github.com/rust-lang/rust/issues/73255): Destructure
+        // instead of using unsafe.
+        unsafe { ManuallyDrop::into_inner(Transmute { u: ManuallyDrop::new(self) }.t) }
     }
 
     /// Gets an unaligned raw pointer to the inner `T`.
@@ -832,7 +851,7 @@ impl<T> Unalign<T> {
     /// [`read_unaligned`].
     ///
     /// [`read_unaligned`]: core::ptr::read_unaligned
-    pub fn get_ptr(&self) -> *const T {
+    pub const fn get_ptr(&self) -> *const T {
         ptr::addr_of!(self.0)
     }
 
@@ -850,6 +869,7 @@ impl<T> Unalign<T> {
     /// [`read_unaligned`].
     ///
     /// [`read_unaligned`]: core::ptr::read_unaligned
+    // TODO(https://github.com/rust-lang/rust/issues/57349): Make this `const`.
     pub fn get_mut_ptr(&mut self) -> *mut T {
         ptr::addr_of_mut!(self.0)
     }
@@ -857,6 +877,7 @@ impl<T> Unalign<T> {
 
 impl<T: Copy> Unalign<T> {
     /// Gets a copy of the inner `T`.
+    // TODO(https://github.com/rust-lang/rust/issues/57349): Make this `const`.
     pub fn get(&self) -> T {
         let Unalign(val) = *self;
         val
@@ -904,7 +925,7 @@ macro_rules! transmute {
             // This branch, though never taken, ensures that the type of `e` is
             // `AsBytes` and that the type of this macro invocation expression
             // is `FromBytes`.
-            fn transmute<T: $crate::AsBytes, U: $crate::FromBytes>(_t: T) -> U {
+            const fn transmute<T: $crate::AsBytes, U: $crate::FromBytes>(_t: T) -> U {
                 unreachable!()
             }
             transmute(e)
@@ -2462,6 +2483,12 @@ mod tests {
             }
         }
         let _: () = transmute!(PanicOnDrop(()));
+
+        // Test that `transmute!` is legal in a const context.
+        const ARRAY_OF_U8S: [u8; 8] = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        const ARRAY_OF_ARRAYS: [[u8; 2]; 4] = [[0, 1], [2, 3], [4, 5], [6, 7]];
+        const X: [[u8; 2]; 4] = transmute!(ARRAY_OF_U8S);
+        assert_eq!(X, ARRAY_OF_ARRAYS);
     }
 
     #[test]
